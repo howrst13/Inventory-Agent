@@ -454,16 +454,42 @@ class InventoryDecisionAgent:
     def _extract_rop_inputs(self, text: str, lower: str) -> Dict[str, Any]:
         inputs: Dict[str, Any] = {}
 
-        # 1. Average Demand (per period)
-        avg_demand = self._search_patterns([
-            r'(?:average\s*daily\s*demand|mean\s*daily\s*demand|daily\s*demand|demand\s*per\s*day)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)',
-            r'([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(?:units\s*per\s*day|units/day)',
-            r'(?:average\s*weekly\s*demand|mean\s*weekly\s*demand|weekly\s*demand|demand\s*per\s*week)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)',
-            r'([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(?:units\s*per\s*week|units/week)',
-            r'(?:average\s*demand|mean\s*demand|expected\s*demand|demand\s*rate)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)',
-            r'([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(?:units\s*average\s*demand|units\s*mean\s*demand)',
-            r'(?:demand\s*is|demand\s*of)\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(?:units)?',
+        # 1. Demand Standard Deviation (Extract first so it is cleanly isolated)
+        demand_std = self._search_patterns([
+            r'(?:standard\s*deviation\s*of\s*(?:daily|weekly|period)?\s*demand|std\s*dev\s*of\s*(?:daily|weekly|period)?\s*demand)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)',
+            r'(?:daily|weekly|period)?\s*demand\s*(?:standard\s*deviation|std\s*dev|sigma|sigma_d)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)',
+            r'([0-9]+(?:\.[0-9]+)?)\s*(?:units)?\s*(?:demand\s*standard\s*deviation|standard\s*deviation\s*of\s*(?:daily|weekly|period)?\s*demand|std\s*dev\s*of\s*(?:daily|weekly|period)?\s*demand)',
+            r'demand\s*(?:varies|fluctuates)\s*(?:with\s*a\s*standard\s*deviation\s*of|by)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:units)?',
+            r'(?:standard\s*deviation|std\s*dev)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:units)?',
+            r'sigma_d\s*=\s*([0-9]+(?:\.[0-9]+)?)',
         ], text)
+        inputs["std_dev_demand"] = demand_std if demand_std is not None else 0.0
+
+        # 2. Average Demand (per period)
+        # Mask out standard deviation expressions so e.g. "standard deviation of daily demand is 20"
+        # cannot be falsely matched as average daily demand = 20.
+        text_for_demand = re.sub(
+            r'(?:standard\s*deviation|std\s*dev|sigma)\s*of\s*(?:daily|weekly|period)?\s*demand\s*(?:is|=|:|of|at)?\s*[0-9]+(?:\.[0-9]+)?',
+            ' ',
+            text,
+            flags=re.IGNORECASE
+        )
+        text_for_demand = re.sub(
+            r'(?:daily|weekly|period)?\s*demand\s*(?:standard\s*deviation|std\s*dev|sigma|sigma_d)\s*(?:is|=|:|of|at)?\s*[0-9]+(?:\.[0-9]+)?',
+            ' ',
+            text_for_demand,
+            flags=re.IGNORECASE
+        )
+
+        avg_demand = self._search_patterns([
+            r'(?:average\s*(?:daily|weekly|period)?\s*demand|mean\s*(?:daily|weekly|period)?\s*demand|demand\s*per\s*day|demand\s*per\s*week)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)',
+            r'(?:daily|weekly|period)?\s*demand\s*(?:averages|averaging|has\s*an?\s*average\s*of|has\s*a\s*mean\s*of)\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)',
+            r'([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(?:units\s*per\s*day|units/day|units\s*per\s*week|units/week)',
+            r'(?:average\s*demand|mean\s*demand|expected\s*demand|demand\s*rate)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)',
+            r'(?:daily|weekly|period)\s*demand\s*(?:is|=|:|of|at)?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(?:units)?',
+            r'(?:demand\s*is|demand\s*of)\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(?:units)?',
+            r'd\s*=\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)',
+        ], text_for_demand)
         if avg_demand is not None:
             # Check if text explicitly says annual/yearly
             if any(w in lower for w in ["annual demand", "units per year", "yearly demand"]):
@@ -471,20 +497,12 @@ class InventoryDecisionAgent:
             else:
                 inputs["mean_demand_per_period"] = avg_demand
 
-        # 2. Demand Standard Deviation
-        demand_std = self._search_patterns([
-            r'(?:daily\s*demand\s*(?:standard\s*deviation|std\s*dev)|weekly\s*demand\s*(?:standard\s*deviation|std\s*dev))\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)',
-            r'(?:demand\s*standard\s*deviation|standard\s*deviation\s*of\s*demand|std\s*dev\s*of\s*demand|demand\s*std\s*dev|sigma_d|demand\s*sigma)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)',
-            r'([0-9]+(?:\.[0-9]+)?)\s*(?:units)?\s*(?:demand\s*standard\s*deviation|standard\s*deviation\s*of\s*demand|std\s*dev\s*of\s*demand)',
-            r'demand\s*(?:varies|fluctuates)\s*(?:with\s*a\s*standard\s*deviation\s*of|by)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:units)?',
-            r'standard\s*deviation\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:units)?',
-        ], text)
-        inputs["std_dev_demand"] = demand_std if demand_std is not None else 0.0
-
-        # 3. Average Lead Time
+        # 3. Average Lead Time (Recognizes constant, average, delivery, supplier lead time)
         avg_lt = self._search_patterns([
-            r'(?:average\s*lead\s*[- ]\s*time|mean\s*lead\s*[- ]\s*time|expected\s*lead\s*[- ]\s*time|supplier\s*lead\s*[- ]\s*time|delivery\s*lead\s*[- ]\s*time|lead\s*[- ]\s*time|l\s*=)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:days|day|weeks|week|periods|period)?',
-            r'([0-9]+(?:\.[0-9]+)?)\s*(?:day|days|week|weeks|period|periods)\s*(?:average\s*lead\s*[- ]\s*time|lead\s*[- ]\s*time)',
+            r'(?:average\s*lead\s*[- ]\s*time|mean\s*lead\s*[- ]\s*time|expected\s*lead\s*[- ]\s*time|supplier\s*lead\s*[- ]\s*time|delivery\s*lead\s*[- ]\s*time|constant\s*lead\s*[- ]\s*time|lead\s*[- ]\s*time|l\s*=)\s*(?:is|=|:|of|at|is\s*constant\s*at|is\s*constant\s*of|is\s*a\s*constant|constant\s*at)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:days|day|weeks|week|periods|period)?',
+            r'lead\s*[- ]\s*time\s*(?:is|=|:|of|at|is\s*constant\s*at|is\s*constant\s*of|is\s*a\s*constant|constant\s*at)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:days|day|weeks|week|periods|period)?',
+            r'(?:constant\s*)?([0-9]+(?:\.[0-9]+)?)\s*[- ]\s*(?:day|days|week|weeks|period|periods)\s*(?:average\s*lead\s*[- ]\s*time|constant\s*lead\s*[- ]\s*time|lead\s*[- ]\s*time)',
+            r'(?:constant\s*)?([0-9]+(?:\.[0-9]+)?)\s*(?:day|days|week|weeks|period|periods)\s*(?:lead\s*[- ]\s*time)',
         ], text)
         if avg_lt is not None:
             inputs["mean_lead_time_periods"] = avg_lt
@@ -507,7 +525,7 @@ class InventoryDecisionAgent:
             inputs["service_level"] = sl / 100.0 if sl > 1.0 else sl
 
         z_val = self._search_patterns([
-            r'(?:z-score|z\s*score|z\s*value|z\s*=)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)',
+            r'(?:z-score|z\s*score|z\s*value|\(?\s*\bz\b\s*=)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)',
         ], text)
         if z_val is not None:
             inputs["z_score"] = z_val
@@ -531,31 +549,53 @@ class InventoryDecisionAgent:
 
         # 2. Lead Time
         lt = self._search_patterns([
-            r'(?:lead\s*[- ]\s*time|delivery\s*lead\s*time|supplier\s*lead\s*time|l\s*=)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:days|day|weeks|week|periods|period)?',
+            r'(?:average\s*lead\s*[- ]\s*time|mean\s*lead\s*[- ]\s*time|expected\s*lead\s*[- ]\s*time|supplier\s*lead\s*[- ]\s*time|delivery\s*lead\s*[- ]\s*time|constant\s*lead\s*[- ]\s*time|lead\s*[- ]\s*time|l\s*=)\s*(?:is|=|:|of|at|is\s*constant\s*at|is\s*constant\s*of|is\s*a\s*constant|constant\s*at)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:days|day|weeks|week|periods|period)?',
+            r'lead\s*[- ]\s*time\s*(?:is|=|:|of|at|is\s*constant\s*at|is\s*constant\s*of|is\s*a\s*constant|constant\s*at)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:days|day|weeks|week|periods|period)?',
+            r'(?:constant\s*)?([0-9]+(?:\.[0-9]+)?)\s*[- ]\s*(?:day|days|week|weeks|period|periods)\s*(?:average\s*lead\s*[- ]\s*time|constant\s*lead\s*[- ]\s*time|lead\s*[- ]\s*time)',
             r'([0-9]+(?:\.[0-9]+)?)\s*(?:day|days|week|weeks|period|periods)\s*lead\s*[- ]\s*time',
         ], text)
         if lt is not None:
             inputs["lead_time"] = lt
 
-        # 3. Demand (rate per period)
-        d_rate = self._search_patterns([
-            r'(?:average\s*daily\s*demand|mean\s*daily\s*demand|daily\s*demand|demand\s*per\s*day)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)',
-            r'([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(?:units\s*per\s*day|units/day)',
-            r'(?:average\s*demand|mean\s*demand|expected\s*demand|demand\s*rate)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)',
-            r'(?:demand\s*is|demand\s*of)\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(?:units)?',
+        # Demand standard deviation (Extract first so it is cleanly isolated)
+        d_std = self._search_patterns([
+            r'(?:standard\s*deviation\s*of\s*(?:daily|weekly|period)?\s*demand|std\s*dev\s*of\s*(?:daily|weekly|period)?\s*demand)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)',
+            r'(?:daily|weekly|period)?\s*demand\s*(?:standard\s*deviation|std\s*dev|sigma|sigma_d)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)',
+            r'([0-9]+(?:\.[0-9]+)?)\s*(?:units)?\s*(?:demand\s*standard\s*deviation|standard\s*deviation\s*of\s*(?:daily|weekly|period)?\s*demand|std\s*dev\s*of\s*(?:daily|weekly|period)?\s*demand)',
+            r'demand\s*(?:varies|fluctuates)\s*(?:with\s*a\s*standard\s*deviation\s*of|by)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:units)?',
+            r'(?:standard\s*deviation|std\s*dev)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:units)?',
+            r'sigma_d\s*=\s*([0-9]+(?:\.[0-9]+)?)',
         ], text)
+        inputs["std_dev_demand_per_period"] = d_std if d_std is not None else 0.0
+
+        # 3. Demand (rate per period)
+        text_for_demand = re.sub(
+            r'(?:standard\s*deviation|std\s*dev|sigma)\s*of\s*(?:daily|weekly|period)?\s*demand\s*(?:is|=|:|of|at)?\s*[0-9]+(?:\.[0-9]+)?',
+            ' ',
+            text,
+            flags=re.IGNORECASE
+        )
+        text_for_demand = re.sub(
+            r'(?:daily|weekly|period)?\s*demand\s*(?:standard\s*deviation|std\s*dev|sigma|sigma_d)\s*(?:is|=|:|of|at)?\s*[0-9]+(?:\.[0-9]+)?',
+            ' ',
+            text_for_demand,
+            flags=re.IGNORECASE
+        )
+
+        d_rate = self._search_patterns([
+            r'(?:average\s*(?:daily|weekly|period)?\s*demand|mean\s*(?:daily|weekly|period)?\s*demand|demand\s*per\s*day|demand\s*per\s*week)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)',
+            r'(?:daily|weekly|period)?\s*demand\s*(?:averages|averaging|has\s*an?\s*average\s*of|has\s*a\s*mean\s*of)\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)',
+            r'([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(?:units\s*per\s*day|units/day|units\s*per\s*week|units/week)',
+            r'(?:average\s*demand|mean\s*demand|expected\s*demand|demand\s*rate)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)',
+            r'(?:daily|weekly|period)\s*demand\s*(?:is|=|:|of|at)?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(?:units)?',
+            r'(?:demand\s*is|demand\s*of)\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\s*(?:units)?',
+            r'd\s*=\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)',
+        ], text_for_demand)
         if d_rate is not None:
             if any(w in lower for w in ["annual demand", "units per year", "yearly demand"]):
                 inputs["mean_demand_per_period"] = d_rate / 250.0
             else:
                 inputs["mean_demand_per_period"] = d_rate
-
-        # Demand standard deviation
-        d_std = self._search_patterns([
-            r'(?:demand\s*standard\s*deviation|standard\s*deviation\s*of\s*demand|std\s*dev\s*of\s*demand|demand\s*std\s*dev|sigma_d)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)',
-            r'standard\s*deviation\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:units)?',
-        ], text)
-        inputs["std_dev_demand_per_period"] = d_std if d_std is not None else 0.0
 
         # Service level
         sl = self._search_patterns([
