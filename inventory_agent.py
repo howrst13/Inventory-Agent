@@ -148,8 +148,10 @@ class InventoryDecisionAgent:
 
         # 2. Quantity discount indicators
         discount_keywords = [
+            "all-units quantity discount", "all units quantity discount",
+            "all-units discount", "all units discount",
             "quantity discount", "price break", "volume discount", "bulk discount",
-            "discount schedule", "tiers", "tier 1", "tier 2", "order breaks",
+            "discount schedule", "price tiers", "price tier", "tiers", "tier 1", "tier 2", "order breaks",
             "bracket", "unit cost drops", "price schedule", "break point", "quantity break"
         ]
         for kw in discount_keywords:
@@ -192,9 +194,12 @@ class InventoryDecisionAgent:
                 scores[self.MODEL_EOQ] += 2.0
 
         # Disambiguation logic:
-        # If price breaks or tiers are present, prioritize Quantity Discount
-        if any(term in lower for term in ["price break", "quantity break", "discount", "volume discount", "tier"]) and \
-           any(marker in lower for marker in ["[", "tier", "break", "$", "+", "to"]):
+        # If explicit all-units discount, price breaks, or discount tiers are present, prioritize Quantity Discount over standard EOQ
+        if any(term in lower for term in ["all-units", "all units", "quantity discount", "volume discount", "price break", "quantity break"]) and \
+           any(marker in lower for marker in ["[", "tier", "break", "$", "+", "to", "schedule", "bracket"]):
+            scores[self.MODEL_QUANTITY_DISCOUNT] += 8.0
+        elif any(term in lower for term in ["price break", "quantity break", "discount", "volume discount", "tier"]) and \
+             any(marker in lower for marker in ["[", "tier", "break", "$", "+", "to"]):
             scores[self.MODEL_QUANTITY_DISCOUNT] += 4.0
 
         # If periodic review or review interval is present, prioritize Fixed Period Review
@@ -282,18 +287,20 @@ class InventoryDecisionAgent:
             inputs["demand"] = demand
 
         # 3. Holding Cost (Fixed vs. Percentage)
-        fixed_holding = self._search_patterns([
-            r'(?:fixed\s*holding\s*cost|unit\s*holding\s*cost|holding\s*cost|carrying\s*cost|holding\s*expense|cost\s*to\s*hold|cost\s*of\s*holding|storage\s*cost|carrying\s*charge|h\s*=)\s*(?:is|=|:|of|at)?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:per\s*unit|\$/unit|dollars)?',
-            r'\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:dollars|\$)?\s*(?:per\s*unit\s*(?:per\s*year)?|/\s*unit\s*(?:/\s*year)?)\s*(?:fixed\s*holding\s*cost|holding\s*cost|carrying\s*cost|holding\s*expense)?',
-        ], text)
-
         holding_rate = self._search_patterns([
-            r'(?:percentage\s*holding\s*cost|holding\s*cost\s*rate|holding\s*rate|carrying\s*rate|holding\s*cost\s*percentage|carrying\s*cost\s*percentage|annual\s*holding\s*rate)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)\s*%',
-            r'([0-9]+(?:\.[0-9]+)?)\s*%\s*(?:of\s*(?:the)?\s*(?:unit\s*cost|unit\s*price|purchase\s*price|item\s*cost)|per\s*year\s*holding|holding\s*cost|carrying\s*cost|holding\s*rate|carrying\s*rate)',
-            r'(?:percentage\s*holding\s*cost|holding\s*cost\s*rate|holding\s*rate|carrying\s*rate)\s*(?:is|=|:|of|at)?\s*(0\.[0-9]+)',
+            r'(?:percentage\s*holding\s*cost|holding\s*cost\s*rate|holding\s*rate|carrying\s*rate|holding\s*cost\s*percentage|carrying\s*cost\s*percentage|annual\s*holding\s*rate|holding\s*cost|carrying\s*cost)\s*(?:is|=|:|of|at|equal\s*to|is\s*equal\s*to)?\s*([0-9]+(?:\.[0-9]+)?)\s*%',
+            r'([0-9]+(?:\.[0-9]+)?)\s*%\s*(?:of\s*(?:the)?\s*(?:unit\s*)?(?:purchase\s*)?(?:cost|price)|per\s*year\s*holding|holding\s*cost|carrying\s*cost|holding\s*rate|carrying\s*rate)',
+            r'(?:percentage\s*holding\s*cost|holding\s*cost\s*rate|holding\s*rate|carrying\s*rate|holding\s*cost|carrying\s*cost)\s*(?:is|=|:|of|at|equal\s*to|is\s*equal\s*to)?\s*(0\.[0-9]+)(?!\s*%)',
         ], text)
         if holding_rate is not None and holding_rate > 1.0:
             holding_rate = holding_rate / 100.0
+
+        fixed_holding = self._search_patterns([
+            r'(?:fixed\s*holding\s*cost|unit\s*holding\s*cost|storage\s*cost|carrying\s*charge|h\s*=)\s*(?:is|=|:|of|at|equal\s*to|is\s*equal\s*to)?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)\b(?!\s*%)\s*(?:per\s*unit|\$/unit|dollars)?',
+            r'(?:holding\s*cost|carrying\s*cost|holding\s*expense|cost\s*to\s*hold|cost\s*of\s*holding)\s*(?:is|=|:|of|at|equal\s*to|is\s*equal\s*to)?\s*\$\s*([0-9]+(?:\.[0-9]+)?)\b(?!\s*%)\s*(?:per\s*unit|\$/unit|dollars)?',
+            r'(?:holding\s*cost|carrying\s*cost|holding\s*expense|cost\s*to\s*hold|cost\s*of\s*holding)\s*(?:is|=|:|of|at|equal\s*to|is\s*equal\s*to)?\s*([0-9]+(?:\.[0-9]+)?)\b(?!\s*%)\s*(?:per\s*unit|\$/unit|dollars)',
+            r'\$?\s*([0-9]+(?:\.[0-9]+)?)\b(?!\s*%)\s*(?:dollars|\$)?\s*(?:per\s*unit\s*(?:per\s*year)?|/\s*unit\s*(?:/\s*year)?)\s*(?:fixed\s*holding\s*cost|holding\s*cost|carrying\s*cost|holding\s*expense)?',
+        ], text)
 
         # Unit purchase price
         unit_cost = self._search_patterns([
@@ -304,13 +311,13 @@ class InventoryDecisionAgent:
         if unit_cost is not None:
             inputs["unit_cost"] = unit_cost
 
-        if fixed_holding is not None:
-            inputs["holding_cost"] = fixed_holding
-        elif holding_rate is not None and unit_cost is not None:
+        if holding_rate is not None and unit_cost is not None:
             inputs["holding_cost"] = holding_rate * unit_cost
             inputs["holding_cost_rate"] = holding_rate
         elif holding_rate is not None:
             inputs["holding_cost_rate"] = holding_rate
+        elif fixed_holding is not None:
+            inputs["holding_cost"] = fixed_holding
 
         # Lead time and working days
         lead_time = self._search_patterns([
@@ -353,16 +360,18 @@ class InventoryDecisionAgent:
 
         # 3. Holding Cost: Distinguish fixed holding cost vs. percentage holding cost
         percentage_holding = self._search_patterns([
-            r'(?:percentage\s*holding\s*cost|holding\s*cost\s*rate|holding\s*rate|carrying\s*rate|holding\s*cost\s*percentage)\s*(?:is|=|:|of|at)?\s*([0-9]+(?:\.[0-9]+)?)\s*%',
-            r'([0-9]+(?:\.[0-9]+)?)\s*%\s*(?:of\s*(?:the)?\s*(?:unit\s*cost|unit\s*price|purchase\s*price|price)|per\s*year\s*holding|holding|carrying)',
-            r'(?:percentage\s*holding\s*cost|holding\s*cost\s*rate|holding\s*rate|carrying\s*rate)\s*(?:is|=|:|of|at)?\s*(0\.[0-9]+)',
+            r'(?:percentage\s*holding\s*cost|holding\s*cost\s*rate|holding\s*rate|carrying\s*rate|holding\s*cost\s*percentage|carrying\s*cost\s*percentage|holding\s*cost|carrying\s*cost)\s*(?:is|=|:|of|at|equal\s*to|is\s*equal\s*to)?\s*([0-9]+(?:\.[0-9]+)?)\s*%',
+            r'([0-9]+(?:\.[0-9]+)?)\s*%\s*(?:of\s*(?:the)?\s*(?:unit\s*)?(?:purchase\s*)?(?:price|cost)|per\s*year\s*holding|holding\s*cost|carrying\s*cost|holding\s*rate|carrying\s*rate|holding|carrying)',
+            r'(?:percentage\s*holding\s*cost|holding\s*cost\s*rate|holding\s*rate|carrying\s*rate|holding\s*cost|carrying\s*cost)\s*(?:is|=|:|of|at|equal\s*to|is\s*equal\s*to)?\s*(0\.[0-9]+)(?!\s*%)',
         ], text)
         if percentage_holding is not None and percentage_holding > 1.0:
             percentage_holding = percentage_holding / 100.0
 
         fixed_holding = self._search_patterns([
-            r'(?:fixed\s*holding\s*cost|holding\s*cost|carrying\s*cost|storage\s*cost|h\s*=)\s*(?:is|=|:|of|at)?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:per\s*unit|\$/unit|dollars)?',
-            r'\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:per\s*unit\s*(?:per\s*year)?|/\s*unit/\s*year)',
+            r'(?:fixed\s*holding\s*cost|unit\s*holding\s*cost|storage\s*cost|h\s*=)\s*(?:is|=|:|of|at|equal\s*to|is\s*equal\s*to)?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)\b(?!\s*%)\s*(?:per\s*unit|\$/unit|dollars)?',
+            r'(?:holding\s*cost|carrying\s*cost|holding\s*expense)\s*(?:is|=|:|of|at|equal\s*to|is\s*equal\s*to)?\s*\$\s*([0-9]+(?:\.[0-9]+)?)\b(?!\s*%)\s*(?:per\s*unit|\$/unit|dollars)?',
+            r'(?:holding\s*cost|carrying\s*cost|holding\s*expense)\s*(?:is|=|:|of|at|equal\s*to|is\s*equal\s*to)?\s*([0-9]+(?:\.[0-9]+)?)\b(?!\s*%)\s*(?:per\s*unit|\$/unit|dollars)',
+            r'\$?\s*([0-9]+(?:\.[0-9]+)?)\b(?!\s*%)\s*(?:dollars|\$)?\s*(?:per\s*unit\s*(?:per\s*year)?|/\s*unit/\s*year)',
         ], text)
 
         if percentage_holding is not None:
