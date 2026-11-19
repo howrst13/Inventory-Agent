@@ -30,6 +30,7 @@ from typing import List, Dict, Any, Optional
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 
 from inventory_agent import InventoryDecisionAgent, AgentDecisionResponse
 
@@ -386,36 +387,260 @@ def run_streamlit_app():
 # CSV Data Processing & Analysis (pandas)
 # ============================================================================
 
-def render_csv_analysis_section(uploaded_csv):
+def perform_multicriteria_classification(
+    df: pd.DataFrame,
+    sales_col: str,
+    hits_col: str,
+    pareto_cutoff: float = 0.80,
+) -> pd.DataFrame:
     """
-    Processes an uploaded CSV file, validates required columns, computes
-    inventory analytics using pandas, and renders summary results.
+    Performs multicriteria inventory classification using Sales and Hits into A, B, C, and D classes.
+
+    Methodology:
+      - Bivariate Pareto / 2x2 Matrix Classification on Monetary Impact (Sales) and Transaction Velocity (Hits).
+      - Class A: High Sales & High Hits (Critical high-value, high-velocity items)
+      - Class B: High Sales & Low Hits  (High-value, slow-moving / lumpy demand items)
+      - Class C: Low Sales & High Hits  (Low-value, high-velocity / frequent-pick items)
+      - Class D: Low Sales & Low Hits   (Low-value, slow-moving tail / candidates for phase-out)
     """
-    st.divider()
-    st.header("📊 Uploaded Inventory Data Analysis")
+    df_calc = df.copy()
 
-    # 1. Read the CSV file into a pandas dataframe
-    try:
-        df = pd.read_csv(uploaded_csv)
-    except Exception as e:
-        st.error(f"❌ Failed to parse uploaded CSV file: {str(e)}")
-        return
+    # Clean and parse Sales to numeric
+    if pd.api.types.is_numeric_dtype(df_calc[sales_col]):
+        df_calc["Clean_Sales"] = pd.to_numeric(df_calc[sales_col], errors="coerce").fillna(0.0)
+    else:
+        df_calc["Clean_Sales"] = pd.to_numeric(
+            df_calc[sales_col]
+            .astype(str)
+            .str.replace("$", "", regex=False)
+            .str.replace(",", "", regex=False)
+            .str.strip(),
+            errors="coerce",
+        ).fillna(0.0)
 
-    # 2. Validate that required columns are present: Product, Category, Units, Unit Cost
-    required_columns = ["Product", "Category", "Units", "Unit Cost"]
-    missing_columns = [col for col in required_columns if col not in df.columns]
+    # Clean and parse Hits to numeric
+    if pd.api.types.is_numeric_dtype(df_calc[hits_col]):
+        df_calc["Clean_Hits"] = pd.to_numeric(df_calc[hits_col], errors="coerce").fillna(0.0)
+    else:
+        df_calc["Clean_Hits"] = pd.to_numeric(
+            df_calc[hits_col]
+            .astype(str)
+            .str.replace(",", "", regex=False)
+            .str.strip(),
+            errors="coerce",
+        ).fillna(0.0)
 
-    # 3. If required columns are not present, display clear message identifying missing columns
-    if missing_columns:
-        st.error(
-            f"❌ Missing required column(s) in uploaded CSV: **{', '.join(missing_columns)}**"
+    total_sales = df_calc["Clean_Sales"].sum()
+    total_hits = df_calc["Clean_Hits"].sum()
+
+    # Share percentages
+    df_calc["Sales Share %"] = (df_calc["Clean_Sales"] / total_sales * 100.0) if total_sales > 0 else 0.0
+    df_calc["Hits Share %"] = (df_calc["Clean_Hits"] / total_hits * 100.0) if total_hits > 0 else 0.0
+
+    # Pareto Ranking for Sales ($)
+    sorted_sales = df_calc.sort_values(by="Clean_Sales", ascending=False)
+    if total_sales > 0:
+        prev_cum_sales = (sorted_sales["Clean_Sales"].cumsum() - sorted_sales["Clean_Sales"]) / total_sales
+        sales_high_indices = sorted_sales[prev_cum_sales < pareto_cutoff].index
+    else:
+        sales_high_indices = pd.Index([])
+
+    # Pareto Ranking for Hits
+    sorted_hits = df_calc.sort_values(by="Clean_Hits", ascending=False)
+    if total_hits > 0:
+        prev_cum_hits = (sorted_hits["Clean_Hits"].cumsum() - sorted_hits["Clean_Hits"]) / total_hits
+        hits_high_indices = sorted_hits[prev_cum_hits < pareto_cutoff].index
+    else:
+        hits_high_indices = pd.Index([])
+
+    # Velocity assignment
+    df_calc["Sales Velocity"] = np.where(df_calc.index.isin(sales_high_indices), "High", "Low")
+    df_calc["Hits Velocity"] = np.where(df_calc.index.isin(hits_high_indices), "High", "Low")
+
+    # Multicriteria classification into A, B, C, D
+    def assign_class(row):
+        is_sh = row["Sales Velocity"] == "High"
+        is_hh = row["Hits Velocity"] == "High"
+        if is_sh and is_hh:
+            return "A"
+        elif is_sh and not is_hh:
+            return "B"
+        elif not is_sh and is_hh:
+            return "C"
+        else:
+            return "D"
+
+    df_calc["Inventory Class"] = df_calc.apply(assign_class, axis=1)
+
+    descriptions = {
+        "A": "Class A: High Sales, High Hits (Fast Movers, High Value)",
+        "B": "Class B: High Sales, Low Hits (Slow Movers, High Value)",
+        "C": "Class C: Low Sales, High Hits (Fast Movers, Low Value)",
+        "D": "Class D: Low Sales, Low Hits (Slow Movers, Low Value)",
+    }
+    df_calc["Class Description"] = df_calc["Inventory Class"].map(descriptions)
+
+    return df_calc
+
+
+def render_multicriteria_classification_section(df: pd.DataFrame, sales_col: str, hits_col: str):
+    """Renders the multicriteria inventory classification dashboard in Streamlit."""
+    st.subheader("🏷️ Multicriteria Inventory Classification (Classes A, B, C, D)")
+    st.caption(
+        "Multicriteria cross-classification on Monetary Value (**Sales**) and Transaction Frequency (**Hits**) "
+        "using bivariate Pareto analysis."
+    )
+
+    # Classify the dataframe
+    df_classified = perform_multicriteria_classification(df, sales_col, hits_col, pareto_cutoff=0.80)
+
+    total_items = len(df_classified)
+    total_sales = df_classified["Clean_Sales"].sum()
+    total_hits = df_classified["Clean_Hits"].sum()
+    avg_sales = df_classified["Clean_Sales"].mean() if total_items > 0 else 0.0
+
+    # Dataset high-level overview metrics
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Total Items", f"{total_items:,}")
+    with c2:
+        st.metric("Total Sales", f"${total_sales:,.2f}")
+    with c3:
+        st.metric("Total Hits", f"{total_hits:,.0f}")
+    with c4:
+        st.metric("Avg Sales / Item", f"${avg_sales:,.2f}")
+
+    st.markdown("---")
+
+    # Multicriteria Quadrant Breakdown Cards
+    st.markdown("#### Multicriteria Class Distribution")
+    q_col1, q_col2, q_col3, q_col4 = st.columns(4)
+
+    classes_count = df_classified["Inventory Class"].value_counts().to_dict()
+    classes_sales = df_classified.groupby("Inventory Class")["Clean_Sales"].sum().to_dict()
+
+    with q_col1:
+        cnt_a = classes_count.get("A", 0)
+        pct_a = (cnt_a / total_items * 100.0) if total_items > 0 else 0.0
+        sales_a = classes_sales.get("A", 0.0)
+        st.success(f"**Class A** (High Sales, High Hits)\n\n**{cnt_a} items** ({pct_a:.1f}%)\n\nSales: ${sales_a:,.2f}")
+
+    with q_col2:
+        cnt_b = classes_count.get("B", 0)
+        pct_b = (cnt_b / total_items * 100.0) if total_items > 0 else 0.0
+        sales_b = classes_sales.get("B", 0.0)
+        st.info(f"**Class B** (High Sales, Low Hits)\n\n**{cnt_b} items** ({pct_b:.1f}%)\n\nSales: ${sales_b:,.2f}")
+
+    with q_col3:
+        cnt_c = classes_count.get("C", 0)
+        pct_c = (cnt_c / total_items * 100.0) if total_items > 0 else 0.0
+        sales_c = classes_sales.get("C", 0.0)
+        st.warning(f"**Class C** (Low Sales, High Hits)\n\n**{cnt_c} items** ({pct_c:.1f}%)\n\nSales: ${sales_c:,.2f}")
+
+    with q_col4:
+        cnt_d = classes_count.get("D", 0)
+        pct_d = (cnt_d / total_items * 100.0) if total_items > 0 else 0.0
+        sales_d = classes_sales.get("D", 0.0)
+        st.error(f"**Class D** (Low Sales, Low Hits)\n\n**{cnt_d} items** ({pct_d:.1f}%)\n\nSales: ${sales_d:,.2f}")
+
+    # Aggregated Summary Table
+    st.markdown("#### Summary Table by Inventory Class")
+    summary = (
+        df_classified.groupby("Inventory Class", observed=False)
+        .agg(
+            Item_Count=(df_classified.columns[0], "count"),
+            Total_Sales=("Clean_Sales", "sum"),
+            Total_Hits=("Clean_Hits", "sum"),
         )
-        st.info(
-            f"The uploaded CSV must contain the following columns: **{', '.join(required_columns)}**"
-        )
-        return
+        .reindex(["A", "B", "C", "D"], fill_value=0)
+        .reset_index()
+    )
+    summary["% of Items"] = (summary["Item_Count"] / total_items * 100.0) if total_items > 0 else 0.0
+    summary["% of Sales"] = (summary["Total_Sales"] / total_sales * 100.0) if total_sales > 0 else 0.0
+    summary["% of Hits"] = (summary["Total_Hits"] / total_hits * 100.0) if total_hits > 0 else 0.0
 
-    # 4 & 5. Display dataset metadata: rows, columns, column names
+    policy_map = {
+        "A": "Tight continuous review (s, Q), high target service level (98%+), frequent small replenishment.",
+        "B": "Strict holding-cost control, lumpy demand management, make-to-order or lean safety stock.",
+        "C": "Periodic review (R, S) / visual two-bin Kanban, high safety buffer (cheap to stock, frequent pick).",
+        "D": "Rationalize SKU, minimum order quantity, check for obsolescence / dead stock.",
+    }
+    summary["Strategic Inventory Policy"] = summary["Inventory Class"].map(policy_map)
+
+    st.dataframe(
+        summary.style.format({
+            "Item_Count": "{:,}",
+            "% of Items": "{:.1f}%",
+            "Total_Sales": "${:,.2f}",
+            "% of Sales": "{:.1f}%",
+            "Total_Hits": "{:,.0f}",
+            "% of Hits": "{:.1f}%",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # Classified Dataframe Display
+    st.markdown("#### Classified Inventory Dataframe (with A, B, C, D Classes)")
+
+    # Optional filter by class
+    f_col1, f_col2 = st.columns([1, 3])
+    with f_col1:
+        selected_filter = st.selectbox(
+            "Filter by Class:",
+            options=["All Classes", "Class A", "Class B", "Class C", "Class D"],
+            key="class_filter_select",
+        )
+    with f_col2:
+        search_query = st.text_input("Search by Item Name or Number:", placeholder="e.g., Widget, 1001...", key="item_search_input")
+
+    filtered_df = df_classified.copy()
+    if selected_filter != "All Classes":
+        target_class = selected_filter.replace("Class ", "")
+        filtered_df = filtered_df[filtered_df["Inventory Class"] == target_class]
+    if search_query:
+        mask = (
+            filtered_df["Item Number"].astype(str).str.contains(search_query, case=False, na=False)
+            | filtered_df["Item Name"].astype(str).str.contains(search_query, case=False, na=False)
+        )
+        filtered_df = filtered_df[mask]
+
+    # Present formatted display columns
+    display_cols = [
+        "Item Number",
+        "Item Name",
+        "UoM",
+        sales_col,
+        hits_col,
+        "Sales Share %",
+        "Hits Share %",
+        "Sales Velocity",
+        "Hits Velocity",
+        "Inventory Class",
+        "Class Description",
+    ]
+    # Filter to existing columns in dataframe
+    valid_display_cols = [c for c in display_cols if c in filtered_df.columns]
+
+    st.dataframe(
+        filtered_df[valid_display_cols].style.format({
+            sales_col: "${:,.2f}" if filtered_df[sales_col].dtype != object else "{}",
+            hits_col: "{:,.0f}" if filtered_df[hits_col].dtype != object else "{}",
+            "Sales Share %": "{:.2f}%",
+            "Hits Share %": "{:.2f}%",
+        }),
+        use_container_width=True,
+    )
+
+    with st.expander("View Raw Uploaded Dataframe", expanded=False):
+        st.dataframe(df, use_container_width=True)
+
+
+def render_units_analysis_section(df: pd.DataFrame):
+    """Renders the standard Product, Category, Units, and Unit Cost inventory analysis."""
+    st.subheader("📦 Inventory Units & Category Analysis")
+
+    # Display dataset metadata
     col_r, col_c, col_cols = st.columns([1, 1, 3])
     with col_r:
         st.metric("Number of Rows", f"{len(df):,}")
@@ -426,32 +651,29 @@ def render_csv_analysis_section(uploaded_csv):
 
     # Prepare numeric columns for calculation
     df_calc = df.copy()
-    if df_calc["Units"].dtype == object:
+    if pd.api.types.is_numeric_dtype(df_calc["Units"]):
+        df_calc["Units"] = pd.to_numeric(df_calc["Units"], errors="coerce").fillna(0.0)
+    else:
         df_calc["Units"] = pd.to_numeric(
             df_calc["Units"].astype(str).str.replace(",", "").str.strip(),
             errors="coerce",
-        )
-    else:
-        df_calc["Units"] = pd.to_numeric(df_calc["Units"], errors="coerce")
+        ).fillna(0.0)
 
-    if df_calc["Unit Cost"].dtype == object:
+    if pd.api.types.is_numeric_dtype(df_calc["Unit Cost"]):
+        df_calc["Unit Cost"] = pd.to_numeric(df_calc["Unit Cost"], errors="coerce").fillna(0.0)
+    else:
         df_calc["Unit Cost"] = pd.to_numeric(
-            df_calc["Unit Cost"].astype(str).str.replace("$", "").str.replace(",", "").str.strip(),
+            df_calc["Unit Cost"].astype(str).str.replace("$", "", regex=False).str.replace(",", "", regex=False).str.strip(),
             errors="coerce",
-        )
-    else:
-        df_calc["Unit Cost"] = pd.to_numeric(df_calc["Unit Cost"], errors="coerce")
+        ).fillna(0.0)
 
-    # ------------------------------------------------------------------------
-    # DATA ANALYSIS (using pandas and the uploaded dataframe)
-    # ------------------------------------------------------------------------
-    # 1. Calculate total Units
+    # 1. Total Units
     total_units = df_calc["Units"].sum()
 
-    # 2. Calculate average Unit Cost
+    # 2. Average Unit Cost
     avg_unit_cost = df_calc["Unit Cost"].mean()
 
-    # 3. Identify the Product with the highest Units
+    # 3. Identify Product with highest Units
     if not df_calc["Units"].dropna().empty:
         max_idx = df_calc["Units"].idxmax()
         highest_units_product = df_calc.loc[max_idx, "Product"]
@@ -460,7 +682,7 @@ def render_csv_analysis_section(uploaded_csv):
         highest_units_product = "N/A"
         highest_units_count = 0.0
 
-    # 4. Group data by Category and calculate total Units for each Category
+    # 4. Group data by Category and calculate total Units
     category_summary = (
         df_calc.groupby("Category")["Units"]
         .sum()
@@ -469,16 +691,14 @@ def render_csv_analysis_section(uploaded_csv):
         .sort_values(by="Total Units", ascending=False)
     )
 
-    # 5. Create a new calculated column: Inventory Value = Units * Unit Cost
+    # 5. Calculated column: Inventory Value = Units * Unit Cost
     df_calc["Inventory Value"] = df_calc["Units"] * df_calc["Unit Cost"]
 
-    # 6. Calculate total Inventory Value across all products
+    # 6. Total Inventory Value across all products
     total_inventory_value = df_calc["Inventory Value"].sum()
 
-    # ------------------------------------------------------------------------
-    # RESULTS DISPLAY
-    # ------------------------------------------------------------------------
-    st.subheader("Key Inventory Metrics")
+    # Summary Metrics
+    st.markdown("#### Key Inventory Metrics")
     m1, m2, m3, m4 = st.columns(4)
     with m1:
         st.metric("Total Units", f"{total_units:,.0f}")
@@ -501,7 +721,7 @@ def render_csv_analysis_section(uploaded_csv):
         hide_index=True,
     )
 
-    # Dataframe including the new Inventory Value column with currency formatting
+    # Dataframe including the new Inventory Value column
     st.markdown("#### Inventory Dataframe (with Calculated Inventory Value)")
     st.dataframe(
         df_calc.style.format({
@@ -512,9 +732,61 @@ def render_csv_analysis_section(uploaded_csv):
         use_container_width=True,
     )
 
-    # Display original uploaded dataframe view
     with st.expander("View Raw Uploaded Dataframe", expanded=False):
         st.dataframe(df, use_container_width=True)
+
+
+def render_csv_analysis_section(uploaded_csv):
+    """
+    Processes an uploaded CSV file, detects the schema format, and runs either
+    Multicriteria Inventory Classification or Product Units/Value Analysis.
+    """
+    st.divider()
+    st.header("📊 Uploaded Inventory Data Analysis")
+
+    # 1. Read CSV into a pandas dataframe
+    try:
+        df = pd.read_csv(uploaded_csv)
+    except Exception as e:
+        st.error(f"❌ Failed to parse uploaded CSV file: {str(e)}")
+        return
+
+    # Schema Detection:
+    # Format A: Multicriteria Classification ("Item Number", "Item Name", "UoM", "Sales ($)" / "Sales", "Hits")
+    sales_col = next((c for c in df.columns if c in ["Sales ($)", "Sales", "Sales($)"] or "sales" in c.lower()), None)
+    hits_col = next((c for c in df.columns if c.strip().lower() == "hits" or "hits" in c.lower()), None)
+    has_classification_core = all(c in df.columns for c in ["Item Number", "Item Name", "UoM"])
+    is_classification_format = has_classification_core and (sales_col is not None) and (hits_col is not None)
+
+    # Format B: Product Units Analysis ("Product", "Category", "Units", "Unit Cost")
+    units_required = ["Product", "Category", "Units", "Unit Cost"]
+    is_units_format = all(c in df.columns for c in units_required)
+
+    if not is_classification_format and not is_units_format:
+        # Check specific missing columns for classification format if partially matching
+        st.error("❌ The uploaded CSV does not match a supported inventory schema format.")
+        col_help1, col_help2 = st.columns(2)
+        with col_help1:
+            st.info(
+                "**Schema 1: Multicriteria Inventory Classification (A, B, C, D)** requires columns:\n"
+                "- `Item Number`\n- `Item Name`\n- `UoM`\n- `Sales ($)` (or `Sales`)\n- `Hits`"
+            )
+        with col_help2:
+            st.info(
+                "**Schema 2: Product & Inventory Value Analysis** requires columns:\n"
+                "- `Product`\n- `Category`\n- `Units`\n- `Unit Cost`"
+            )
+        return
+
+    # Execute Multicriteria Classification if applicable
+    if is_classification_format:
+        render_multicriteria_classification_section(df, sales_col, hits_col)
+
+    # Execute Units / Value analysis if applicable
+    if is_units_format:
+        if is_classification_format:
+            st.divider()
+        render_units_analysis_section(df)
 
 
 # ============================================================================
