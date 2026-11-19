@@ -391,21 +391,28 @@ def perform_multicriteria_classification(
     df: pd.DataFrame,
     sales_col: str,
     hits_col: str,
-    pareto_cutoff: float = 0.80,
+    cutoff_a: float = 80.0,
+    cutoff_b: float = 90.0,
+    cutoff_c: float = 95.0,
 ) -> pd.DataFrame:
     """
-    Performs multicriteria inventory classification using Sales and Hits into A, B, C, and D classes.
+    Performs multicriteria inventory classification using Sales ($) and POS Hits.
 
     Methodology:
-      - Bivariate Pareto / 2x2 Matrix Classification on Monetary Impact (Sales) and Transaction Velocity (Hits).
-      - Class A: High Sales & High Hits (Critical high-value, high-velocity items)
-      - Class B: High Sales & Low Hits  (High-value, slow-moving / lumpy demand items)
-      - Class C: Low Sales & High Hits  (Low-value, high-velocity / frequent-pick items)
-      - Class D: Low Sales & Low Hits   (Low-value, slow-moving tail / candidates for phase-out)
+      1. Independently sort inventory items by descending Sales ($) and descending POS Hits.
+         Calculate cumulative percentages for each criterion.
+      2. Convert individual Sales and Hits classes to scores: A=4, B=3, C=2, D=1.
+      3. Calculate Combined Weighted Score = 0.65 * Sales Score + 0.35 * Hits Score.
+      4. Assign final classes:
+           - A for score >= 3.25
+           - B for score >= 2.50 and < 3.25
+           - C for score >= 1.75 and < 2.50
+           - D for score < 1.75
+         Scores are strictly not rounded before classification.
     """
     df_calc = df.copy()
 
-    # Clean and parse Sales to numeric
+    # Clean and parse Sales to numeric float64
     if pd.api.types.is_numeric_dtype(df_calc[sales_col]):
         df_calc["Clean_Sales"] = pd.to_numeric(df_calc[sales_col], errors="coerce").fillna(0.0)
     else:
@@ -418,7 +425,7 @@ def perform_multicriteria_classification(
             errors="coerce",
         ).fillna(0.0)
 
-    # Clean and parse Hits to numeric
+    # Clean and parse Hits to numeric float64
     if pd.api.types.is_numeric_dtype(df_calc[hits_col]):
         df_calc["Clean_Hits"] = pd.to_numeric(df_calc[hits_col], errors="coerce").fillna(0.0)
     else:
@@ -433,66 +440,97 @@ def perform_multicriteria_classification(
     total_sales = df_calc["Clean_Sales"].sum()
     total_hits = df_calc["Clean_Hits"].sum()
 
-    # Share percentages
-    df_calc["Sales Share %"] = (df_calc["Clean_Sales"] / total_sales * 100.0) if total_sales > 0 else 0.0
-    df_calc["Hits Share %"] = (df_calc["Clean_Hits"] / total_hits * 100.0) if total_hits > 0 else 0.0
-
-    # Pareto Ranking for Sales ($)
-    sorted_sales = df_calc.sort_values(by="Clean_Sales", ascending=False)
+    # Step 1: Independently sort by descending Sales ($) and calculate cumulative percentages
+    sorted_sales = df_calc.sort_values(by="Clean_Sales", ascending=False).copy()
     if total_sales > 0:
-        prev_cum_sales = (sorted_sales["Clean_Sales"].cumsum() - sorted_sales["Clean_Sales"]) / total_sales
-        sales_high_indices = sorted_sales[prev_cum_sales < pareto_cutoff].index
+        sorted_sales["Cumulative Sales"] = sorted_sales["Clean_Sales"].cumsum()
+        sorted_sales["Cumulative Sales %"] = sorted_sales["Cumulative Sales"] / total_sales * 100.0
     else:
-        sales_high_indices = pd.Index([])
+        sorted_sales["Cumulative Sales"] = 0.0
+        sorted_sales["Cumulative Sales %"] = 0.0
 
-    # Pareto Ranking for Hits
-    sorted_hits = df_calc.sort_values(by="Clean_Hits", ascending=False)
+    sales_classes = []
+    for idx, row in sorted_sales.reset_index().iterrows():
+        is_first = (idx == 0)
+        c_pct = row["Cumulative Sales %"]
+        if is_first or c_pct <= cutoff_a:
+            sales_classes.append("A")
+        elif c_pct <= cutoff_b:
+            sales_classes.append("B")
+        elif c_pct <= cutoff_c:
+            sales_classes.append("C")
+        else:
+            sales_classes.append("D")
+    sorted_sales["Sales Class"] = sales_classes
+
+    # Map Sales metrics back to original index order
+    df_calc["Cumulative Sales %"] = sorted_sales["Cumulative Sales %"]
+    df_calc["Sales Class"] = sorted_sales["Sales Class"]
+
+    # Step 1 (cont.): Independently sort by descending POS Hits and calculate cumulative percentages
+    sorted_hits = df_calc.sort_values(by="Clean_Hits", ascending=False).copy()
     if total_hits > 0:
-        prev_cum_hits = (sorted_hits["Clean_Hits"].cumsum() - sorted_hits["Clean_Hits"]) / total_hits
-        hits_high_indices = sorted_hits[prev_cum_hits < pareto_cutoff].index
+        sorted_hits["Cumulative Hits"] = sorted_hits["Clean_Hits"].cumsum()
+        sorted_hits["Cumulative Hits %"] = sorted_hits["Cumulative Hits"] / total_hits * 100.0
     else:
-        hits_high_indices = pd.Index([])
+        sorted_hits["Cumulative Hits"] = 0.0
+        sorted_hits["Cumulative Hits %"] = 0.0
 
-    # Velocity assignment
-    df_calc["Sales Velocity"] = np.where(df_calc.index.isin(sales_high_indices), "High", "Low")
-    df_calc["Hits Velocity"] = np.where(df_calc.index.isin(hits_high_indices), "High", "Low")
+    hits_classes = []
+    for idx, row in sorted_hits.reset_index().iterrows():
+        is_first = (idx == 0)
+        c_pct = row["Cumulative Hits %"]
+        if is_first or c_pct <= cutoff_a:
+            hits_classes.append("A")
+        elif c_pct <= cutoff_b:
+            hits_classes.append("B")
+        elif c_pct <= cutoff_c:
+            hits_classes.append("C")
+        else:
+            hits_classes.append("D")
+    sorted_hits["Hits Class"] = hits_classes
 
-    # Multicriteria classification into A, B, C, D
-    def assign_class(row):
-        is_sh = row["Sales Velocity"] == "High"
-        is_hh = row["Hits Velocity"] == "High"
-        if is_sh and is_hh:
+    # Map Hits metrics back to original index order
+    df_calc["Cumulative Hits %"] = sorted_hits["Cumulative Hits %"]
+    df_calc["Hits Class"] = sorted_hits["Hits Class"]
+
+    # Step 2: Convert classes to scores: A=4, B=3, C=2, D=1
+    score_map = {"A": 4, "B": 3, "C": 2, "D": 1}
+    df_calc["Sales Score"] = df_calc["Sales Class"].map(score_map).astype(int)
+    df_calc["Hits Score"] = df_calc["Hits Class"].map(score_map).astype(int)
+
+    # Step 3: Calculate Combined Weighted Score = 0.65 * Sales Score + 0.35 * Hits Score
+    df_calc["Combined Weighted Score"] = 0.65 * df_calc["Sales Score"] + 0.35 * df_calc["Hits Score"]
+
+    # Step 4: Assign final classes without rounding scores:
+    # A for score >= 3.25, B for >= 2.50 and < 3.25, C for >= 1.75 and < 2.50, and D for < 1.75
+    def assign_final_class(score: float) -> str:
+        if score >= 3.25:
             return "A"
-        elif is_sh and not is_hh:
+        elif score >= 2.50:
             return "B"
-        elif not is_sh and is_hh:
+        elif score >= 1.75:
             return "C"
         else:
             return "D"
 
-    df_calc["Inventory Class"] = df_calc.apply(assign_class, axis=1)
-
-    descriptions = {
-        "A": "Class A: High Sales, High Hits (Fast Movers, High Value)",
-        "B": "Class B: High Sales, Low Hits (Slow Movers, High Value)",
-        "C": "Class C: Low Sales, High Hits (Fast Movers, Low Value)",
-        "D": "Class D: Low Sales, Low Hits (Slow Movers, Low Value)",
-    }
-    df_calc["Class Description"] = df_calc["Inventory Class"].map(descriptions)
+    df_calc["Inventory Class"] = df_calc["Combined Weighted Score"].apply(assign_final_class)
 
     return df_calc
 
 
 def render_multicriteria_classification_section(df: pd.DataFrame, sales_col: str, hits_col: str):
     """Renders the multicriteria inventory classification dashboard in Streamlit."""
-    st.subheader("🏷️ Multicriteria Inventory Classification (Classes A, B, C, D)")
+    st.subheader("🏷️ Multicriteria Inventory Classification (Weighted Score Methodology)")
     st.caption(
-        "Multicriteria cross-classification on Monetary Value (**Sales**) and Transaction Frequency (**Hits**) "
-        "using bivariate Pareto analysis."
+        "Criteria: **Sales ($)** (Weight: 65%) and **POS Hits** (Weight: 35%). "
+        "Class Scores: A=4, B=3, C=2, D=1 | Combined Score = 0.65 × Sales Score + 0.35 × Hits Score. "
+        "Boundaries: Class A (Score $\\ge$ 3.25), Class B (2.50 $\\le$ Score < 3.25), "
+        "Class C (1.75 $\\le$ Score < 2.50), Class D (Score < 1.75)."
     )
 
-    # Classify the dataframe
-    df_classified = perform_multicriteria_classification(df, sales_col, hits_col, pareto_cutoff=0.80)
+    # Classify the dataframe using weighted score methodology
+    df_classified = perform_multicriteria_classification(df, sales_col, hits_col)
 
     total_items = len(df_classified)
     total_sales = df_classified["Clean_Sales"].sum()
@@ -506,14 +544,14 @@ def render_multicriteria_classification_section(df: pd.DataFrame, sales_col: str
     with c2:
         st.metric("Total Sales", f"${total_sales:,.2f}")
     with c3:
-        st.metric("Total Hits", f"{total_hits:,.0f}")
+        st.metric("Total POS Hits", f"{total_hits:,.0f}")
     with c4:
         st.metric("Avg Sales / Item", f"${avg_sales:,.2f}")
 
     st.markdown("---")
 
-    # Multicriteria Quadrant Breakdown Cards
-    st.markdown("#### Multicriteria Class Distribution")
+    # Item counts and total Sales ($) by final class
+    st.markdown("#### Final Class Distribution & Total Sales")
     q_col1, q_col2, q_col3, q_col4 = st.columns(4)
 
     classes_count = df_classified["Inventory Class"].value_counts().to_dict()
@@ -523,71 +561,103 @@ def render_multicriteria_classification_section(df: pd.DataFrame, sales_col: str
         cnt_a = classes_count.get("A", 0)
         pct_a = (cnt_a / total_items * 100.0) if total_items > 0 else 0.0
         sales_a = classes_sales.get("A", 0.0)
-        st.success(f"**Class A** (High Sales, High Hits)\n\n**{cnt_a} items** ({pct_a:.1f}%)\n\nSales: ${sales_a:,.2f}")
+        sales_pct_a = (sales_a / total_sales * 100.0) if total_sales > 0 else 0.0
+        st.success(
+            f"**Class A** (Score $\\ge$ 3.25)\n\n"
+            f"**{cnt_a} items** ({pct_a:.1f}%)\n\n"
+            f"Total Sales: **${sales_a:,.2f}** ({sales_pct_a:.1f}%)"
+        )
 
     with q_col2:
         cnt_b = classes_count.get("B", 0)
         pct_b = (cnt_b / total_items * 100.0) if total_items > 0 else 0.0
         sales_b = classes_sales.get("B", 0.0)
-        st.info(f"**Class B** (High Sales, Low Hits)\n\n**{cnt_b} items** ({pct_b:.1f}%)\n\nSales: ${sales_b:,.2f}")
+        sales_pct_b = (sales_b / total_sales * 100.0) if total_sales > 0 else 0.0
+        st.info(
+            f"**Class B** (2.50 $\\le$ Score < 3.25)\n\n"
+            f"**{cnt_b} items** ({pct_b:.1f}%)\n\n"
+            f"Total Sales: **${sales_b:,.2f}** ({sales_pct_b:.1f}%)"
+        )
 
     with q_col3:
         cnt_c = classes_count.get("C", 0)
         pct_c = (cnt_c / total_items * 100.0) if total_items > 0 else 0.0
         sales_c = classes_sales.get("C", 0.0)
-        st.warning(f"**Class C** (Low Sales, High Hits)\n\n**{cnt_c} items** ({pct_c:.1f}%)\n\nSales: ${sales_c:,.2f}")
+        sales_pct_c = (sales_c / total_sales * 100.0) if total_sales > 0 else 0.0
+        st.warning(
+            f"**Class C** (1.75 $\\le$ Score < 2.50)\n\n"
+            f"**{cnt_c} items** ({pct_c:.1f}%)\n\n"
+            f"Total Sales: **${sales_c:,.2f}** ({sales_pct_c:.1f}%)"
+        )
 
     with q_col4:
         cnt_d = classes_count.get("D", 0)
         pct_d = (cnt_d / total_items * 100.0) if total_items > 0 else 0.0
         sales_d = classes_sales.get("D", 0.0)
-        st.error(f"**Class D** (Low Sales, Low Hits)\n\n**{cnt_d} items** ({pct_d:.1f}%)\n\nSales: ${sales_d:,.2f}")
+        sales_pct_d = (sales_d / total_sales * 100.0) if total_sales > 0 else 0.0
+        st.error(
+            f"**Class D** (Score < 1.75)\n\n"
+            f"**{cnt_d} items** ({pct_d:.1f}%)\n\n"
+            f"Total Sales: **${sales_d:,.2f}** ({sales_pct_d:.1f}%)"
+        )
 
     # Aggregated Summary Table
-    st.markdown("#### Summary Table by Inventory Class")
+    st.markdown("#### Summary Table by Final Inventory Class")
     summary = (
         df_classified.groupby("Inventory Class", observed=False)
         .agg(
-            Item_Count=(df_classified.columns[0], "count"),
+            Item_Count=("Clean_Sales", "count"),
             Total_Sales=("Clean_Sales", "sum"),
             Total_Hits=("Clean_Hits", "sum"),
+            Avg_Combined_Score=("Combined Weighted Score", "mean"),
         )
         .reindex(["A", "B", "C", "D"], fill_value=0)
         .reset_index()
     )
     summary["% of Items"] = (summary["Item_Count"] / total_items * 100.0) if total_items > 0 else 0.0
-    summary["% of Sales"] = (summary["Total_Sales"] / total_sales * 100.0) if total_sales > 0 else 0.0
-    summary["% of Hits"] = (summary["Total_Hits"] / total_hits * 100.0) if total_hits > 0 else 0.0
+    summary["% of Total Sales"] = (summary["Total_Sales"] / total_sales * 100.0) if total_sales > 0 else 0.0
+    summary["% of Total Hits"] = (summary["Total_Hits"] / total_hits * 100.0) if total_hits > 0 else 0.0
 
-    policy_map = {
-        "A": "Tight continuous review (s, Q), high target service level (98%+), frequent small replenishment.",
-        "B": "Strict holding-cost control, lumpy demand management, make-to-order or lean safety stock.",
-        "C": "Periodic review (R, S) / visual two-bin Kanban, high safety buffer (cheap to stock, frequent pick).",
-        "D": "Rationalize SKU, minimum order quantity, check for obsolescence / dead stock.",
+    score_rule_map = {
+        "A": "Score >= 3.25 (Top revenue / high movement items)",
+        "B": "2.50 <= Score < 3.25 (Moderate revenue / velocity items)",
+        "C": "1.75 <= Score < 2.50 (Low revenue or velocity items)",
+        "D": "Score < 1.75 (Bottom tail / slow moving items)",
     }
-    summary["Strategic Inventory Policy"] = summary["Inventory Class"].map(policy_map)
+    summary["Score Boundary Rule"] = summary["Inventory Class"].map(score_rule_map)
 
     st.dataframe(
-        summary.style.format({
+        summary[[
+            "Inventory Class",
+            "Item_Count",
+            "% of Items",
+            "Total_Sales",
+            "% of Total Sales",
+            "Total_Hits",
+            "% of Total Hits",
+            "Avg_Combined_Score",
+            "Score Boundary Rule",
+        ]].style.format({
             "Item_Count": "{:,}",
             "% of Items": "{:.1f}%",
             "Total_Sales": "${:,.2f}",
-            "% of Sales": "{:.1f}%",
+            "% of Total Sales": "{:.1f}%",
             "Total_Hits": "{:,.0f}",
-            "% of Hits": "{:.1f}%",
+            "% of Total Hits": "{:.1f}%",
+            "Avg_Combined_Score": "{:.2f}",
         }),
         use_container_width=True,
         hide_index=True,
     )
 
-    # Classified Dataframe Display
-    st.markdown("#### Classified Inventory Dataframe (with A, B, C, D Classes)")
+    # Detailed Classified Dataframe Display
+    st.markdown("#### Item-Level Multicriteria Classification Results")
 
-    # Optional filter by class
+    # Filter by class
     f_col1, f_col2 = st.columns([1, 3])
     with f_col1:
         selected_filter = st.selectbox(
-            "Filter by Class:",
+            "Filter by Final Class:",
             options=["All Classes", "Class A", "Class B", "Class C", "Class D"],
             key="class_filter_select",
         )
@@ -605,29 +675,33 @@ def render_multicriteria_classification_section(df: pd.DataFrame, sales_col: str
         )
         filtered_df = filtered_df[mask]
 
-    # Present formatted display columns
+    # Present formatted display columns as specified in requirement 5
     display_cols = [
         "Item Number",
         "Item Name",
         "UoM",
         sales_col,
+        "Cumulative Sales %",
+        "Sales Class",
+        "Sales Score",
         hits_col,
-        "Sales Share %",
-        "Hits Share %",
-        "Sales Velocity",
-        "Hits Velocity",
+        "Cumulative Hits %",
+        "Hits Class",
+        "Hits Score",
+        "Combined Weighted Score",
         "Inventory Class",
-        "Class Description",
     ]
-    # Filter to existing columns in dataframe
     valid_display_cols = [c for c in display_cols if c in filtered_df.columns]
 
     st.dataframe(
         filtered_df[valid_display_cols].style.format({
             sales_col: "${:,.2f}" if filtered_df[sales_col].dtype != object else "{}",
+            "Cumulative Sales %": "{:.2f}%",
+            "Sales Score": "{:d}",
             hits_col: "{:,.0f}" if filtered_df[hits_col].dtype != object else "{}",
-            "Sales Share %": "{:.2f}%",
-            "Hits Share %": "{:.2f}%",
+            "Cumulative Hits %": "{:.2f}%",
+            "Hits Score": "{:d}",
+            "Combined Weighted Score": "{:.2f}",
         }),
         use_container_width=True,
     )
