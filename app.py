@@ -391,9 +391,9 @@ def perform_multicriteria_classification(
     df: pd.DataFrame,
     sales_col: str,
     hits_col: str,
-    cutoff_a: float = 80.0,
-    cutoff_b: float = 90.0,
-    cutoff_c: float = 95.0,
+    cutoff_a: float = 60.0,
+    cutoff_b: float = 80.0,
+    cutoff_c: float = 90.0,
 ) -> pd.DataFrame:
     """
     Performs multicriteria inventory classification using Sales ($) and POS Hits.
@@ -401,6 +401,11 @@ def perform_multicriteria_classification(
     Methodology:
       1. Independently sort inventory items by descending Sales ($) and descending POS Hits.
          Calculate cumulative percentages for each criterion.
+         Assign individual criteria classes using cumulative percentage cutoffs:
+           - Class A: Cumulative % <= 60%
+           - Class B: 60% < Cumulative % <= 80%
+           - Class C: 80% < Cumulative % <= 90%
+           - Class D: Cumulative % > 90%
       2. Convert individual Sales and Hits classes to scores: A=4, B=3, C=2, D=1.
       3. Calculate Combined Weighted Score = 0.65 * Sales Score + 0.35 * Hits Score.
       4. Assign final classes:
@@ -524,6 +529,7 @@ def render_multicriteria_classification_section(df: pd.DataFrame, sales_col: str
     st.subheader("🏷️ Multicriteria Inventory Classification (Weighted Score Methodology)")
     st.caption(
         "Criteria: **Sales ($)** (Weight: 65%) and **POS Hits** (Weight: 35%). "
+        "Thresholds: Class A ($\\le$ 60%), Class B (60% to $\\le$ 80%), Class C (80% to $\\le$ 90%), Class D (> 90%). "
         "Class Scores: A=4, B=3, C=2, D=1 | Combined Score = 0.65 × Sales Score + 0.35 × Hits Score. "
         "Boundaries: Class A (Score $\\ge$ 3.25), Class B (2.50 $\\le$ Score < 3.25), "
         "Class C (1.75 $\\le$ Score < 2.50), Class D (Score < 1.75)."
