@@ -396,29 +396,52 @@ class InventoryDecisionAgent:
                 price_breaks = []
 
         if not price_breaks:
-            # 1. Range pattern: e.g. "0 to 499 at $10.00", "500-999: $9.80"
+            # 1. Range pattern: e.g. "1–499 units at $10.00", "0 to 499 at $10.00", "500-999: $9.80"
+            # Supports ASCII hyphens, en dashes (–), em dashes (—), minus (–), 'to', and commas in quantities (e.g. 1,000)
             range_matches = re.findall(
-                r'([0-9]+)\s*(?:to|-)\s*([0-9]+)\s*(?:units)?\s*(?:at|costs?|:)?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)',
+                r'([0-9]+(?:,[0-9]{3})*)\s*(?:to|-|–|—|−|\.\.)\s*([0-9]+(?:,[0-9]{3})*)\s*(?:units)?\s*[\)\]]?\s*(?:at|costs?|:|,)?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)',
                 lower
             )
             for low_b, high_b, pr in range_matches:
                 price_breaks.append({
-                    "min_qty": float(low_b),
-                    "max_qty": float(high_b),
+                    "min_qty": float(low_b.replace(",", "")),
+                    "max_qty": float(high_b.replace(",", "")),
                     "price": float(pr)
                 })
 
-            # 2. Plus/Over pattern: e.g. "1000+ at $9.60", "1000 and above: $9.60", "1000 or more: $9.60", "over 1000 at $9.60"
+            # 2. Plus/Over/Above pattern: e.g. "1,000+ units at $9.00", "1,000 or more units at $9.00", "1000 and above: $9.60"
             plus_matches = re.findall(
-                r'([0-9]+)\s*(?:\+|and\s*above|and\s*over|or\s*more|above)\s*(?:units)?\s*(?:at|costs?|:)?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)',
+                r'([0-9]+(?:,[0-9]{3})*)\s*(?:units)?\s*(?:\+|and\s*above|and\s*over|or\s*more|above)\s*(?:units)?\s*[\)\]]?\s*(?:at|costs?|:|,)?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)',
                 lower
             )
             for low_b, pr in plus_matches:
                 price_breaks.append({
-                    "min_qty": float(low_b),
+                    "min_qty": float(low_b.replace(",", "")),
                     "max_qty": None,
                     "price": float(pr)
                 })
+
+            # 3. Over / above prefix pattern: e.g. "over 1,000 units at $9.00"
+            over_matches = re.findall(
+                r'(?:over|above|exceeding)\s*([0-9]+(?:,[0-9]{3})*)\s*(?:units)?\s*[\)\]]?\s*(?:at|costs?|:|,)?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)',
+                lower
+            )
+            for low_b, pr in over_matches:
+                price_breaks.append({
+                    "min_qty": float(low_b.replace(",", "")),
+                    "max_qty": None,
+                    "price": float(pr)
+                })
+
+            # De-duplicate while preserving order and sort by min_qty
+            seen = set()
+            unique_breaks = []
+            for pb in price_breaks:
+                key = (pb["min_qty"], pb["max_qty"], pb["price"])
+                if key not in seen:
+                    seen.add(key)
+                    unique_breaks.append(pb)
+            price_breaks = sorted(unique_breaks, key=lambda pb: pb["min_qty"])
 
         if price_breaks:
             inputs["price_breaks"] = price_breaks
