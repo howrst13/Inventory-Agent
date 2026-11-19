@@ -684,8 +684,8 @@ class InventoryDecisionAgent:
 
         # 3. Salvage Value
         salvage = self._search_patterns([
-            r'(?:salvage\s*value|salvage\s*price|scrap\s*value|liquidation\s*value|clearance\s*price|markdown\s*price|residual\s*value|salvage|v\s*=)\s*(?:is|=|:|of|at)?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)',
-            r'\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:salvage\s*value|scrap\s*value|salvage|clearance|markdown)',
+            r'(?:salvage\s*value|salvage\s*price|scrap\s*value|liquidation\s*value|clearance\s*price|markdown\s*price|residual\s*value|salvage|v\s*=)(?:\s*of\s*(?:unsold|leftover|excess|residual)?\s*(?:inventory|units|items|goods|stock|product|products))?\s*(?:is|=|:|of|at|equal\s*to)?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)',
+            r'\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:dollars|\$)?\s*(?:per\s*unit)?\s*(?:salvage\s*value|scrap\s*value|salvage|clearance|markdown)(?:\s*of\s*(?:unsold|leftover|excess)?\s*(?:inventory|units|items))?',
             r'(?:salvaged\s*for|liquidated\s*at|cleared\s*at)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)',
         ], text)
         inputs["salvage_value"] = salvage if salvage is not None else 0.0
