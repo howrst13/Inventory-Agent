@@ -29,6 +29,7 @@ import unittest
 from typing import List, Dict, Any, Optional
 
 import streamlit as st
+import pandas as pd
 
 from inventory_agent import InventoryDecisionAgent, AgentDecisionResponse
 
@@ -157,6 +158,17 @@ def run_streamlit_app():
             st.session_state.user_question = ""
             st.rerun()
 
+        # --------------------------------------------------------------------
+        # Data Upload Section (Last Section in Sidebar)
+        # --------------------------------------------------------------------
+        st.divider()
+        st.header("Data Upload")
+        uploaded_csv = st.file_uploader(
+            "Upload CSV File",
+            type=["csv"],
+            help="Upload an inventory CSV file containing Product, Category, Units, and Unit Cost.",
+        )
+
     # ------------------------------------------------------------------------
     # Main Application Header
     # ------------------------------------------------------------------------
@@ -193,180 +205,316 @@ def run_streamlit_app():
 
     if not active_question:
         st.info("💡 Enter a question above or select one of the 5 benchmark scenarios from the sidebar to begin.")
-        return
+    else:
+        # --------------------------------------------------------------------
+        # Agent Execution Pipeline
+        # --------------------------------------------------------------------
+        with st.spinner("Executing 7-step decision pipeline..."):
+            try:
+                response: AgentDecisionResponse = agent.process_question(active_question)
+            except Exception as e:
+                st.error(f"❌ Error processing question: {str(e)}")
+                response = None
 
-    # ------------------------------------------------------------------------
-    # Agent Execution Pipeline
-    # ------------------------------------------------------------------------
-    with st.spinner("Executing 7-step decision pipeline..."):
-        try:
-            response: AgentDecisionResponse = agent.process_question(active_question)
-        except Exception as e:
-            st.error(f"❌ Error processing question: {str(e)}")
-            return
+        if response is not None:
+            # Case A: Incomplete Information (Missing Required Parameters)
+            if not response.is_complete:
+                st.warning("⚠️ Additional Information Required")
 
-    # ------------------------------------------------------------------------
-    # Case A: Incomplete Information (Missing Required Parameters)
-    # ------------------------------------------------------------------------
-    if not response.is_complete:
-        st.warning("⚠️ Additional Information Required")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.info(
+                        f"**Identified Model:** {response.model_name_display}  \n"
+                        f"**Confidence:** {response.confidence_score * 100:.1f}%  \n"
+                        f"**Target Tool:** `inventory_tools.{response.selected_tool_name}`"
+                    )
+                with col2:
+                    st.error(
+                        "**Missing Required Parameters:**  \n"
+                        + "\n".join([f"- **{m}**" for m in response.missing_parameters])
+                        + "\n\n*(The agent will never invent missing numerical values)*"
+                    )
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.info(
-                f"**Identified Model:** {response.model_name_display}  \n"
-                f"**Confidence:** {response.confidence_score * 100:.1f}%  \n"
-                f"**Target Tool:** `inventory_tools.{response.selected_tool_name}`"
-            )
-        with col2:
-            st.error(
-                "**Missing Required Parameters:**  \n"
-                + "\n".join([f"- **{m}**" for m in response.missing_parameters])
-                + "\n\n*(The agent will never invent missing numerical values)*"
-            )
+                if response.extracted_inputs:
+                    with st.expander("Extracted Parameters Found in Question", expanded=True):
+                        for k, v in response.extracted_inputs.items():
+                            if k != "price_breaks":
+                                st.markdown(f"- **{k}**: `{v}`")
+                            else:
+                                st.markdown(f"- **price_breaks**: `{v}`")
 
-        if response.extracted_inputs:
-            with st.expander("Extracted Parameters Found in Question", expanded=True):
-                for k, v in response.extracted_inputs.items():
-                    if k != "price_breaks":
-                        st.markdown(f"- **{k}**: `{v}`")
+                st.markdown(response.explanation)
+            else:
+                # Case B: Complete Information - Render Full Verification & Decisions
+                calc = response.calculation_result
+
+                # Pipeline Status Banner
+                st.success(
+                    f"✅ **Pipeline Executed:** Model Identified as **{response.model_name_display}** "
+                    f"({response.confidence_score * 100:.1f}% confidence) $\\rightarrow$ "
+                    f"Dispatched Tool: `inventory_tools.{response.selected_tool_name}`"
+                )
+
+                # Tabs for Organized Student Presentation
+                tab_audit, tab_exec, tab_raw = st.tabs([
+                    "🎓 Student Step-by-Step Verification (8 Sections)",
+                    "📊 Executive Recommendation & Insights",
+                    "📄 Full Formatted Terminal Report",
+                ])
+
+                # ----------------------------------------------------------------
+                # Tab 1: Student Verification (8 Mandatory Sections)
+                # ----------------------------------------------------------------
+                with tab_audit:
+                    st.subheader("Student Step-by-Step Verification Audit")
+                    st.caption("All intermediate numerical calculations are derived deterministically in Python.")
+
+                    # Final Answer Callout Card
+                    final_val = getattr(calc, "final_answer", None)
+                    if isinstance(final_val, float):
+                        st.metric(
+                            label=f"Final Answer ({response.model_name_display})",
+                            value=f"{final_val:,.2f}",
+                            delta=f"Exact: {final_val:,.4f}",
+                        )
                     else:
-                        st.markdown(f"- **price_breaks**: `{v}`")
+                        st.metric(
+                            label=f"Final Answer ({response.model_name_display})",
+                            value=str(final_val),
+                        )
 
-        st.markdown(response.explanation)
+                    col_left, col_right = st.columns(2)
+
+                    with col_left:
+                        # 1. Inputs Extracted
+                        st.markdown("#### 1. Inputs Extracted")
+                        if hasattr(calc, "inputs_extracted") and calc.inputs_extracted:
+                            for k, v in calc.inputs_extracted.items():
+                                if v is not None:
+                                    if isinstance(v, float):
+                                        val_str = f"{v:,.4f}" if (0 < abs(v) < 1) else f"{v:,.2f}"
+                                        st.markdown(f"- **{k}**: `{val_str}`")
+                                    elif isinstance(v, list):
+                                        st.markdown(f"- **{k}**: `{v}`")
+                                    else:
+                                        st.markdown(f"- **{k}**: `{v}`")
+                        else:
+                            st.markdown("*(None)*")
+
+                        # 2. Variable Definitions
+                        st.markdown("#### 2. Variable Definitions")
+                        if hasattr(calc, "variable_definitions") and calc.variable_definitions:
+                            for var_sym, var_desc in calc.variable_definitions.items():
+                                st.markdown(f"- **{var_sym}**: {var_desc}")
+                        else:
+                            st.markdown("*(None)*")
+
+                    with col_right:
+                        # 5. Intermediate Calculations
+                        st.markdown("#### 5. Intermediate Calculations")
+                        if hasattr(calc, "intermediate_calculations") and calc.intermediate_calculations:
+                            for ik, iv in calc.intermediate_calculations.items():
+                                if isinstance(iv, float):
+                                    val_str = f"{iv:,.2f}" if (abs(iv) >= 1000 or (0.01 <= abs(iv) < 1000 and abs(iv - round(iv, 2)) < 1e-4)) else f"{iv:,.4f}"
+                                    st.markdown(f"- **{ik}**: `{val_str}`")
+                                elif isinstance(iv, (list, dict)):
+                                    st.markdown(f"- **{ik}**: `{iv}`")
+                                else:
+                                    st.markdown(f"- **{ik}**: `{iv}`")
+                        else:
+                            st.markdown("*(None)*")
+
+                        # 6. Final Answer
+                        st.markdown("#### 6. Final Answer")
+                        st.markdown(f"**Recommended Optimal Value**: `{final_val}`")
+
+                    st.divider()
+
+                    # 3. Formula
+                    st.markdown("#### 3. Formula")
+                    formula_text = getattr(calc, "formula", "N/A")
+                    st.code(formula_text, language="text")
+
+                    # 4. Formula with Substituted Values
+                    st.markdown("#### 4. Formula with Substituted Values")
+                    sub_text = getattr(calc, "formula_with_substituted_values", "N/A")
+                    st.code(sub_text, language="text")
+
+                    col_chk, col_asm = st.columns(2)
+
+                    with col_chk:
+                        # 7. Verification Checks
+                        st.markdown("#### 7. Verification Checks")
+                        if hasattr(calc, "verification_checks") and calc.verification_checks:
+                            for chk in calc.verification_checks:
+                                st.success(f"✔ {chk}")
+                        for w in response.verification.warnings:
+                            st.warning(f"⚠ {w}")
+                        for e in response.verification.errors:
+                            st.error(f"❌ {e}")
+
+                    with col_asm:
+                        # 8. Assumptions
+                        st.markdown("#### 8. Model Assumptions")
+                        if hasattr(calc, "assumptions") and calc.assumptions:
+                            for asm in calc.assumptions:
+                                st.markdown(f"- {asm}")
+
+                # ----------------------------------------------------------------
+                # Tab 2: Executive Explanation & Insights
+                # ----------------------------------------------------------------
+                with tab_exec:
+                    st.subheader("Executive Decision & Supply Chain Insights")
+                    st.markdown(response.explanation)
+
+                # ----------------------------------------------------------------
+                # Tab 3: Complete Raw Terminal Report (Easy for Copy/Pasting)
+                # ----------------------------------------------------------------
+                with tab_raw:
+                    st.subheader("Raw Terminal Report")
+                    st.caption("Complete formatted text report with all 7 pipeline steps:")
+                    st.code(response.formatted_output, language="text")
+
+    # ------------------------------------------------------------------------
+    # Data Processing & Analysis (When CSV is uploaded)
+    # ------------------------------------------------------------------------
+    if uploaded_csv is not None:
+        render_csv_analysis_section(uploaded_csv)
+
+
+# ============================================================================
+# CSV Data Processing & Analysis (pandas)
+# ============================================================================
+
+def render_csv_analysis_section(uploaded_csv):
+    """
+    Processes an uploaded CSV file, validates required columns, computes
+    inventory analytics using pandas, and renders summary results.
+    """
+    st.divider()
+    st.header("📊 Uploaded Inventory Data Analysis")
+
+    # 1. Read the CSV file into a pandas dataframe
+    try:
+        df = pd.read_csv(uploaded_csv)
+    except Exception as e:
+        st.error(f"❌ Failed to parse uploaded CSV file: {str(e)}")
         return
 
-    # ------------------------------------------------------------------------
-    # Case B: Complete Information - Render Full Verification & Decisions
-    # ------------------------------------------------------------------------
-    calc = response.calculation_result
+    # 2. Validate that required columns are present: Product, Category, Units, Unit Cost
+    required_columns = ["Product", "Category", "Units", "Unit Cost"]
+    missing_columns = [col for col in required_columns if col not in df.columns]
 
-    # Pipeline Status Banner
-    st.success(
-        f"✅ **Pipeline Executed:** Model Identified as **{response.model_name_display}** "
-        f"({response.confidence_score * 100:.1f}% confidence) $\\rightarrow$ "
-        f"Dispatched Tool: `inventory_tools.{response.selected_tool_name}`"
+    # 3. If required columns are not present, display clear message identifying missing columns
+    if missing_columns:
+        st.error(
+            f"❌ Missing required column(s) in uploaded CSV: **{', '.join(missing_columns)}**"
+        )
+        st.info(
+            f"The uploaded CSV must contain the following columns: **{', '.join(required_columns)}**"
+        )
+        return
+
+    # 4 & 5. Display dataset metadata: rows, columns, column names
+    col_r, col_c, col_cols = st.columns([1, 1, 3])
+    with col_r:
+        st.metric("Number of Rows", f"{len(df):,}")
+    with col_c:
+        st.metric("Number of Columns", f"{len(df.columns):,}")
+    with col_cols:
+        st.info(f"**Column Names ({len(df.columns)}):** {', '.join(df.columns.tolist())}")
+
+    # Prepare numeric columns for calculation
+    df_calc = df.copy()
+    if df_calc["Units"].dtype == object:
+        df_calc["Units"] = pd.to_numeric(
+            df_calc["Units"].astype(str).str.replace(",", "").str.strip(),
+            errors="coerce",
+        )
+    else:
+        df_calc["Units"] = pd.to_numeric(df_calc["Units"], errors="coerce")
+
+    if df_calc["Unit Cost"].dtype == object:
+        df_calc["Unit Cost"] = pd.to_numeric(
+            df_calc["Unit Cost"].astype(str).str.replace("$", "").str.replace(",", "").str.strip(),
+            errors="coerce",
+        )
+    else:
+        df_calc["Unit Cost"] = pd.to_numeric(df_calc["Unit Cost"], errors="coerce")
+
+    # ------------------------------------------------------------------------
+    # DATA ANALYSIS (using pandas and the uploaded dataframe)
+    # ------------------------------------------------------------------------
+    # 1. Calculate total Units
+    total_units = df_calc["Units"].sum()
+
+    # 2. Calculate average Unit Cost
+    avg_unit_cost = df_calc["Unit Cost"].mean()
+
+    # 3. Identify the Product with the highest Units
+    if not df_calc["Units"].dropna().empty:
+        max_idx = df_calc["Units"].idxmax()
+        highest_units_product = df_calc.loc[max_idx, "Product"]
+        highest_units_count = df_calc.loc[max_idx, "Units"]
+    else:
+        highest_units_product = "N/A"
+        highest_units_count = 0.0
+
+    # 4. Group data by Category and calculate total Units for each Category
+    category_summary = (
+        df_calc.groupby("Category")["Units"]
+        .sum()
+        .reset_index()
+        .rename(columns={"Units": "Total Units"})
+        .sort_values(by="Total Units", ascending=False)
     )
 
-    # Tabs for Organized Student Presentation
-    tab_audit, tab_exec, tab_raw = st.tabs([
-        "🎓 Student Step-by-Step Verification (8 Sections)",
-        "📊 Executive Recommendation & Insights",
-        "📄 Full Formatted Terminal Report",
-    ])
+    # 5. Create a new calculated column: Inventory Value = Units * Unit Cost
+    df_calc["Inventory Value"] = df_calc["Units"] * df_calc["Unit Cost"]
+
+    # 6. Calculate total Inventory Value across all products
+    total_inventory_value = df_calc["Inventory Value"].sum()
 
     # ------------------------------------------------------------------------
-    # Tab 1: Student Verification (8 Mandatory Sections)
+    # RESULTS DISPLAY
     # ------------------------------------------------------------------------
-    with tab_audit:
-        st.subheader("Student Step-by-Step Verification Audit")
-        st.caption("All intermediate numerical calculations are derived deterministically in Python.")
+    st.subheader("Key Inventory Metrics")
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Total Units", f"{total_units:,.0f}")
+    with m2:
+        st.metric("Average Unit Cost", f"${avg_unit_cost:,.2f}")
+    with m3:
+        st.metric(
+            "Product with Highest Units",
+            str(highest_units_product),
+            delta=f"{highest_units_count:,.0f} units",
+        )
+    with m4:
+        st.metric("Total Inventory Value", f"${total_inventory_value:,.2f}")
 
-        # Final Answer Callout Card
-        final_val = getattr(calc, "final_answer", None)
-        if isinstance(final_val, float):
-            st.metric(
-                label=f"Final Answer ({response.model_name_display})",
-                value=f"{final_val:,.2f}",
-                delta=f"Exact: {final_val:,.4f}",
-            )
-        else:
-            st.metric(
-                label=f"Final Answer ({response.model_name_display})",
-                value=str(final_val),
-            )
+    # Total Units by Category
+    st.markdown("#### Total Units by Category")
+    st.dataframe(
+        category_summary.style.format({"Total Units": "{:,.0f}"}),
+        use_container_width=True,
+        hide_index=True,
+    )
 
-        col_left, col_right = st.columns(2)
+    # Dataframe including the new Inventory Value column with currency formatting
+    st.markdown("#### Inventory Dataframe (with Calculated Inventory Value)")
+    st.dataframe(
+        df_calc.style.format({
+            "Units": "{:,.0f}",
+            "Unit Cost": "${:,.2f}",
+            "Inventory Value": "${:,.2f}",
+        }),
+        use_container_width=True,
+    )
 
-        with col_left:
-            # 1. Inputs Extracted
-            st.markdown("#### 1. Inputs Extracted")
-            if hasattr(calc, "inputs_extracted") and calc.inputs_extracted:
-                for k, v in calc.inputs_extracted.items():
-                    if v is not None:
-                        if isinstance(v, float):
-                            val_str = f"{v:,.4f}" if (0 < abs(v) < 1) else f"{v:,.2f}"
-                            st.markdown(f"- **{k}**: `{val_str}`")
-                        elif isinstance(v, list):
-                            st.markdown(f"- **{k}**: `{v}`")
-                        else:
-                            st.markdown(f"- **{k}**: `{v}`")
-            else:
-                st.markdown("*(None)*")
-
-            # 2. Variable Definitions
-            st.markdown("#### 2. Variable Definitions")
-            if hasattr(calc, "variable_definitions") and calc.variable_definitions:
-                for var_sym, var_desc in calc.variable_definitions.items():
-                    st.markdown(f"- **{var_sym}**: {var_desc}")
-            else:
-                st.markdown("*(None)*")
-
-        with col_right:
-            # 5. Intermediate Calculations
-            st.markdown("#### 5. Intermediate Calculations")
-            if hasattr(calc, "intermediate_calculations") and calc.intermediate_calculations:
-                for ik, iv in calc.intermediate_calculations.items():
-                    if isinstance(iv, float):
-                        val_str = f"{iv:,.2f}" if (abs(iv) >= 1000 or (0.01 <= abs(iv) < 1000 and abs(iv - round(iv, 2)) < 1e-4)) else f"{iv:,.4f}"
-                        st.markdown(f"- **{ik}**: `{val_str}`")
-                    elif isinstance(iv, (list, dict)):
-                        st.markdown(f"- **{ik}**: `{iv}`")
-                    else:
-                        st.markdown(f"- **{ik}**: `{iv}`")
-            else:
-                st.markdown("*(None)*")
-
-            # 6. Final Answer
-            st.markdown("#### 6. Final Answer")
-            st.markdown(f"**Recommended Optimal Value**: `{final_val}`")
-
-        st.divider()
-
-        # 3. Formula
-        st.markdown("#### 3. Formula")
-        formula_text = getattr(calc, "formula", "N/A")
-        st.code(formula_text, language="text")
-
-        # 4. Formula with Substituted Values
-        st.markdown("#### 4. Formula with Substituted Values")
-        sub_text = getattr(calc, "formula_with_substituted_values", "N/A")
-        st.code(sub_text, language="text")
-
-        col_chk, col_asm = st.columns(2)
-
-        with col_chk:
-            # 7. Verification Checks
-            st.markdown("#### 7. Verification Checks")
-            if hasattr(calc, "verification_checks") and calc.verification_checks:
-                for chk in calc.verification_checks:
-                    st.success(f"✔ {chk}")
-            for w in response.verification.warnings:
-                st.warning(f"⚠ {w}")
-            for e in response.verification.errors:
-                st.error(f"❌ {e}")
-
-        with col_asm:
-            # 8. Assumptions
-            st.markdown("#### 8. Model Assumptions")
-            if hasattr(calc, "assumptions") and calc.assumptions:
-                for asm in calc.assumptions:
-                    st.markdown(f"- {asm}")
-
-    # ------------------------------------------------------------------------
-    # Tab 2: Executive Explanation & Insights
-    # ------------------------------------------------------------------------
-    with tab_exec:
-        st.subheader("Executive Decision & Supply Chain Insights")
-        st.markdown(response.explanation)
-
-    # ------------------------------------------------------------------------
-    # Tab 3: Complete Raw Terminal Report (Easy for Copy/Pasting)
-    # ------------------------------------------------------------------------
-    with tab_raw:
-        st.subheader("Raw Terminal Report")
-        st.caption("Complete formatted text report with all 7 pipeline steps:")
-        st.code(response.formatted_output, language="text")
+    # Display original uploaded dataframe view
+    with st.expander("View Raw Uploaded Dataframe", expanded=False):
+        st.dataframe(df, use_container_width=True)
 
 
 # ============================================================================
